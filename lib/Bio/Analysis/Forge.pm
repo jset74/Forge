@@ -23,8 +23,6 @@ sub  error :lvalue { $_[0]->{'_error'}; }
 sub  sh :lvalue { $_[0]->{'_sh'}; }
 sub  dbh :lvalue { $_[0]->{'_dbh'}; }
 sub  logfile :lvalue { $_[0]->{'_logfile'}; }
-sub  t1 :lvalue { $_[0]->{'_t1'}; }
-sub  t2 :lvalue { $_[0]->{'_t2'}; }
 
 # global params that can be passed to the constructor
 sub  dsn :lvalue { $_[0]->{'dsn'}; }
@@ -37,8 +35,11 @@ sub  bkgd :lvalue { $_[0]->{'bkgd'}; }
 sub  label :lvalue { $_[0]->{'label'}; }
 sub  noplot :lvalue { $_[0]->{'noplot'}; }
 sub  r_libs :lvalue { $_[0]->{'r_libs'}; }
+
+sub  t1 :lvalue { $_[0]->{'tmin'}; }
+sub  t2 :lvalue { $_[0]->{'tmax'}; }
+sub  repetitions :lvalue { $_[0]->{'repetitions'}; }
 sub  bkgrdstat :lvalue { $_[0]->{'bkgrdstat'}; }
-sub  thresh :lvalue { $_[0]->{'thresh'}; }
 
 # Constructor - requires location of the forge data as DSN string and directory with forge settings
 sub new {
@@ -51,27 +52,20 @@ sub new {
 
 
     $params->{min_snps} ||= 20;
+    $params->{repetitions} ||= 100;
+
     $params->{data} ||= 'erc';
     $params->{bkgd} ||= 'gwas';
     $params->{user} ||= '';
     $params->{pass} ||= '';
+    $params->{tmin} ||= 2.58;
+    $params->{tmax} ||= 3.59;
 
 
-    my ($t1, $t2);
-
-    if (defined $params->{thresh}){
-	($t1, $t2) = split(",", $params->{thresh});
-	unless (looks_like_number($t1) && looks_like_number($t2)){
-	    warn "You must specify numerical thersholds in a comma separated list";
-	    return undef;
-	}
-    } else{
-	$t1 = 2.58;
-	$t2 = 3.39;
+    unless (looks_like_number($params->{tmin}) && looks_like_number($params->{tmax})){
+	warn "You must specify numerical thersholds";
+	return undef;
     }
-
-    $params->{_t1} = $t1;
-    $params->{_t2} = $t2;
 
     my $dsn = $params->{dsn};
 
