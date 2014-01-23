@@ -277,7 +277,7 @@ sub run {
 	my $snpcount = scalar @foundsnps;
 
 	my $fdr = $self->fdr($pos, $snpcount, $cellcount);
-	$self->debug("$pos positive lines at FDR = $fdr\n");
+	$self->debug("$pos positive lines at FDR = $fdr at Z >= 3.39\n");
 
 
 	unless (defined $self->noplot){
