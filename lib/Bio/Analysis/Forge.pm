@@ -8,12 +8,15 @@ use IO::Handle;
 use File::Path qw(make_path);
 use Data::Dumper;
 use Scalar::Util qw(looks_like_number);
+use Forge::Stats;
+use Forge::Plot;
+use Forge::Forge; # ld_filter . need to use all functions from plot and forge
 
 
 # percentile bins for the bkgrd calculations. This is hard coded so there are enough SNPs to choose from, but could later be altered.
 my $per = 10;
-# number of sets to analyse for bkgrd. Again currently hardcoded to 100
-my $reps = 100;
+# number of sets to analyse for bkgrd. Again currently hardcoded to 1000
+my $reps = 1000;
 
 # internal
 sub  tissues :lvalue { $_[0]->{'_tissues'}; }
@@ -41,6 +44,10 @@ sub  t2 :lvalue { $_[0]->{'tmax'}; }
 sub  repetitions :lvalue { $_[0]->{'repetitions'}; }
 sub  bkgrdstat :lvalue { $_[0]->{'bkgrdstat'}; }
 
+sub r2 :lvalue { $_[0]->{'r2'}; }
+sub nold :lvalue { $_[0]->{'nold'}; }
+sub ld :lvalue { $_[0]->{'ld'}; }
+
 # Constructor - requires location of the forge data as DSN string and directory with forge settings
 sub new {
     my ($class, $params) = @_;
@@ -51,16 +58,27 @@ sub new {
     $params->{_jobid} = "forge/$str/".time;
 
 
-    $params->{min_snps} ||= 20;
+    $params->{min_snps} ||= 5;
     $params->{repetitions} ||= 100;
 
     $params->{data} ||= 'erc';
     $params->{bkgd} ||= 'gwas';
     $params->{user} ||= '';
     $params->{pass} ||= '';
-    $params->{tmin} ||= 2.58;
-    $params->{tmax} ||= 3.59;
+    $params->{tmin} ||= 0.01;
+    $params->{tmax} ||= 0.05;
 
+# Set r2 LD thresholds
+    unless (defined $params->{nold}){
+	my $ld = $params->{ld} || 0.8;
+	unless ($ld == 0.1 || $ld == 0.8){
+	    warn "You have specified LD filtering, but given an invalid value $ld. the format is ld 0.0, ld 0.8, or ld 0.1";
+	    return undef;
+	}
+	my $r2;
+	($r2 = $ld) =~ s /\.//;
+	$params->{r2} = "r".$r2;
+    }
 
     unless (looks_like_number($params->{tmin}) && looks_like_number($params->{tmax})){
 	warn "You must specify numerical thersholds";
@@ -142,10 +160,35 @@ sub run {
 # all info from the analysis will go into log
     $self->logfile = "$folder/LOG";
 
+
+# Remove redundancy in the input
+
+    my %nonredundant;
+    foreach my $snp (@$snps){
+	$nonredundant{$snp}++;
+    }
+    foreach my $snp (keys %nonredundant){
+	if ($nonredundant{$snp} > 1) {
+	    warn "$snp is present " . $nonredundant{$snp} . " times in the input. Analysing only once."
+	}
+    }
+
+    my @snps = keys %nonredundant;
+
+# Perform ld filter unless -nold is specified.
+
+    my ($ld_excluded, $output, $input);
+    unless (defined $self->nold) {
+	$input = scalar @snps;
+	($ld_excluded, @snps) = ld_filter(\@snps, $self->r2, $self->dbh);
+	$output = scalar @snps;
+    }
+
+
     eval {
 	$self->get_cells();
 
-	my $rows = $self->get_bits($snps);
+	my $rows = $self->get_bits(\@snps);
 
 # unpack the bitstrings and store the overlaps by cell.
 	my $test = $self->process_bits($rows);
@@ -168,6 +211,9 @@ sub run {
 # Identify SNPs that weren't found and warn about them.
 	my @missing;
 	foreach my $rsid (@$snps){
+	    if (defined $self->ld) {
+		next if exists $$ld_excluded{$rsid}; # if the snps are not in the 1000 genomes set they will not be found by the LD filter, so we have to recheck here.
+	    }
 	    unless (exists $$test{'SNPS'}{$rsid}){
 		push @missing, $rsid;
 	    }
@@ -181,6 +227,13 @@ sub run {
 	    $self->debug("\nThe following " . scalar @missing . " SNPs have not been analysed because they were not found in the 1000 genomes phase 1 integrated call data\n");
 	    $self->debug(join("\n", @missing) . "\n");
 	}
+
+	if (defined $self->ld) {
+	    if ($output < $input) {
+		self->debug("For ".$self->label.", $input SNPs provided, " . scalar @snps . " retained, " . scalar @missing . " not analysed, "  . scalar(keys %$ld_excluded) . " LD filtered at ".$self->ld.".");
+	    }
+	}
+
 	
 # identify the gc, maf and tss, and then make bkgrd picks
 	my $picks = $self->match(\%$test);
@@ -193,8 +246,12 @@ sub run {
 	my $num = scalar(keys %$picks);
 	my $ic = 0;
 
+# Get the bits for the background sets and process
+	my $backsnps;
+
 	foreach my $bkgrd (keys %{$picks}){
 	    $rows = $self->get_bits(\@{$$picks{$bkgrd}});
+	    $backsnps += scalar @$rows; #$backsnps is the total number of background SNPs analysed
 
 	    unless (scalar @$rows == scalar @foundsnps){
 		$self->debug("Background " . $bkgrd . " only " . scalar @$rows . " SNPs out of " . scalar @foundsnps . "\n");
@@ -239,19 +296,55 @@ sub run {
 	my $tissues = $self->tissues;
 	my $cells = $self->cells;
 
+	my %tissuecount;
+	foreach my $cell (keys %$tissues){
+	    my $tissue = $$tissues{$cell}{'tissue'};
+	    $tissuecount{$tissue}++;
+	}
+
+	my $tissuecount = scalar keys %tissuecount;
+	my $t1 = $self->t1/$tissuecount; # bonferroni correction by number of tissues
+	my $t2 = $self->t2/$tissuecount;
+	
+	$self->t1 = -log10($t1);
+	$self->t2 = -log10($t2);
+	
+
 
 	my $pos = 0;
+	my $snpcount = scalar @foundsnps;
 
 	open my $bfh, ">", "$folder/background.tsv" or die "Cannot open $folder/background.tsv";
 
 	
-
 	foreach my $cell (sort {ncmp($$tissues{$a}{'tissue'},$$tissues{$b}{'tissue'}) || ncmp($a,$b)} @$cells){ # sort by the tissues alphabetically (from $tissues hash values)
-	    # ultimately want a data frame of names(results)<-c("Zscore", "Cell", "Tissue", "File", "SNPs")
+    # ultimately want a data frame of names(results)<-c("Zscore", "Cell", "Tissue", "File", "SNPs")
 	    print $bfh join("\t", @{$bkgrd{$cell}});
+
+	    my $teststat = $$test{'CELLS'}{$cell}{'COUNT'}; #number of overlaps for the test SNPs
+
+    # binomial pvalue, probability of success is derived from the background overlaps over the tests for this cell
+    # $backsnps is the total number of background SNPs analysed
+    # $tests is the number of overlaps found over all the background tests
+	    my $tests;
+	    foreach (@{$bkgrd{$cell}}){
+		$tests+= $_;
+	    }
+	    my $p = sprintf("%.6f", $tests/$backsnps);
+
+    # binomial probability for $teststat or more hits out of $snpcount snps
+    # sum the binomial for each k out of n above $teststat
+	    my $pbinom;
+	    foreach my $k ($teststat .. $snpcount){
+		$pbinom += binomial($k, $snpcount, $p);
+	    }
+	    if ($pbinom >1) {
+		$pbinom = 1;
+	    }
+	    $pbinom = -log10($pbinom);
+    # Z score calculation
 	    my $mean = mean(@{$bkgrd{$cell}});
 	    my $sd = std(@{$bkgrd{$cell}});
-	    my $teststat = $$test{'CELLS'}{$cell}{'COUNT'};
 	    my $zscore;
 	    if ($sd == 0){
 		$zscore = "NA";
@@ -259,23 +352,21 @@ sub run {
 	    else{
 		$zscore = sprintf("%.3f", ($teststat-$mean)/$sd);
 	    }
-
-	    if ($zscore >= $self->t2){
+	    if ($pbinom >= $self->t2){
 		$pos++;
 	    }
-
 	    my $snp_string = "";
-	    $snp_string = join(",", @{$$test{'CELLS'}{$cell}{'SNPS'}}) if defined $$test{'CELLS'}{$cell}{'SNPS'}; # This gives the list of overlapping SNPs for use in the tooltips. If there are a lot of them this can be a little useless
-	    my ($shortcell, undef) = split('\|', $cell); # undo the concatenation from earlier to deal with identical cell names.
-
-	    print $ofh join("\t", $zscore, $shortcell, $$tissues{$cell}{'tissue'}, $$tissues{$cell}{'file'}, $snp_string, $n, $$tissues{$cell}{'acc'}) . "\n";
+	    $snp_string = join(",", @{$$test{'CELLS'}{$cell}{'SNPS'}}) if defined $$test{'CELLS'}{$cell}{'SNPS'}; # This gives the list of overlapping SNPs for use in the tooltips. If there are \
+a lot of them this can be a little useless
+    my ($shortcell, undef) = split('\|', $cell); # undo the concatenation from earlier to deal with identical cell names.
+	    print $ofh join("\t", $zscore, $pbinom, $shortcell, $$tissues{$cell}{'tissue'}, $$tissues{$cell}{'file'}, $snp_string, $n, $$tissues{$cell}{'acc'}) . "\n";
 	    $n++;
 	}
+
+
 	close $ofh;
 
 	my $cellcount = scalar @$cells;
-	my $snpcount = scalar @foundsnps;
-
 	my $fdr = $self->fdr($pos, $snpcount, $cellcount);
 	$self->debug("$pos positive lines at FDR = $fdr at Z >= 3.39\n");
 
@@ -438,79 +529,6 @@ sub get_cells{
     $self->tissues = $tissues;
 
     return 1;
-}
-
-sub assign{
-    #sub routine to assign any maf, gc, tss values to the percentile bins
-    my ($gc, $tss, $maf, $params) = @_;
-    my ($i, $j, $k);
-    my $n = 1;
-    foreach my $pc (@{$$params{'gc'}}){
-        if ($gc <= $pc) {
-            $i = $n;
-        }
-        else{
-            $n++;
-        }
-    }
-    $n=1;
-    foreach my $pc (@{$$params{'tss'}}){
-        if ($tss <= $pc) {
-            $j = $n;
-        }
-        else{
-            $n++;
-        }
-    }
-    $n=1;
-    foreach my $pc (@{$$params{'maf'}}){
-        if ($maf <= $pc) {
-            $k = $n;
-        }
-        else{
-            $n++;
-        }
-    }
-    return ($i, $j, $k);
-}
-
-sub mean {
-    # calculates the biased mean of an array
-    #
-    # pass it a float array and it will return the mean
-    # reused from Ben Brown
-    my $sum = 0;
-    foreach (@_){
-        $sum+= $_;
-        }
-    return $sum/($#_+1);
-}
-
-sub var {
-    # calculates the biased variance of an array
-    #
-    # pass it a float array and it will return the variance
-    # reused from Ben Brown
-    my $ev = mean(@_);
-    my $sum = 0;
-    foreach (@_) { $sum += ($_ - $ev)**2 };
-
-    return $sum/($#_+1);
-}
-
-# calulates the standard deviation of an array: this is just the sqrt of the var
-sub std { sqrt(var(@_)) }
-
-sub fdr{
-    my ($self, $tp, $snps, $cells) = @_;
-    if ($tp == 0){
-        return "NA";
-    }
-    else{
-        my $fpr = 0.0085 * exp(-0.04201 * $snps) + 0.00187; # from simulations of random data  0.0085*exp(-0.04201. SNPs) + 0.00187
-        my $fdr = ($cells * $fpr) / $tp;
-        return $fdr;
-    }
 }
 
 
@@ -720,7 +738,7 @@ sub table{
 
 sub debug {
     my ($self,$msg) = @_;
-#    warn $msg;
+    warn $msg;
     if ($self->logfile) {
 	if (open F, ">>".$self->logfile) {
 	    print F $msg;
@@ -731,7 +749,7 @@ sub debug {
 
 sub status {
     my ($self,$msg) = @_;
-#    warn $msg;
+    warn $msg;
     my $sh = $self->sh;
     print $sh $msg;
 }
@@ -799,5 +817,6 @@ sub parse_input {
 
     return \@snps;
 }
+
 1;
 

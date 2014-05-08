@@ -24,6 +24,8 @@ A table using the Datatables (https://datatables.net) plug-in for the jQuery Jav
 
 In each of the graphics the colouring should be consistent. Blue (Z < 2.58), light red or pink (2.58 =< Z < 3.39), red or dark red (Z >= 3.39 ) for the 99% and 99.9% cIs. Or whatever other thresholds are specified.
 
+Forge functions, plotting options and stats are provided by Forge::Forge, Forge::Plot and Forge::Stats modules.
+
 =head1 OPTIONS
 
 =over
@@ -66,17 +68,17 @@ Can provide the snps as rsids in a comma separated list.
 
 =item B<min_snps>
 
-Specify the minimum number of SNPs to be allowed. Default is 20.
+Specify the minimum number of SNPs to be allowed. Default is 5 now are using binomial test.
 
 =item B<thresh>
 
-Alter the default Z score thresholds. Give a comma separate list of two e.g.2.58,3.39 for the defaults
+Alter the default binomial p value thresholds. Give a comma separate list of two e.g. 2.58,3.39 for the defaults
 
 =item B<format>
 
 if f is specified, specify the file format as follow:
 
-rsid = list of snps as rsids each on a separate line
+rsid = list of snps as rsids each on a separate line. Optionally can add other fields after the rsid which are ignored, unless the pvalue filter is specified, in which case Forge assumes that thesecond field is the minus log10 pvalue
 
 bed  = File given is a bed file of locations (chr\tbeg\tend) aka Personal Genome SNP format.  bed format should be 0 based and the chromosome should be given as chrN. Hoever will also accept chomosomes as just N (ensembl) and 1-based format where beg and end are the same
 
@@ -84,7 +86,11 @@ vcf = File given is a vcf file.
 
 tabix = File contains SNPs in tabix format.
 
-ian = 1-based chr\tbeg\tend\trsid\tpval
+ian = 1-based chr\tbeg\tend\trsid\tpval\tminuslog10pval
+
+=item B<filter>
+
+Set a filter on the SNPs based on the -log10 pvalue.  This works for files in the 'ian' or 'rsid' format. Give a value as the lower threshols and only SNPs with -log10 pvalues >= to the threshold will be analysed. Defaiult is no filtering.
 
 =item B<bkgrd>
 
@@ -92,7 +98,17 @@ Output background stats for investigation.
 
 =item B<reps>
 
-THe number of background matching sets to pick and analyse. Default 100.
+THe number of background matching sets to pick and analyse. Default 1000.
+
+=item B<ld>
+
+Apply filter for SNPs in LD at eithr r2 >= 0.8 ("high LD"), or r2 >= 0.1 ("independent SNPs"). Specify ld 0.8, or ld 0.1. Default is to filter at r2 >= 0.8.  With ld filter specified, forge will report SNPs removed due to LD with another SNP in the list and will randomly pick one for each LD block.
+
+To turn off LD fitlering specify -nold
+
+=item B<nold>
+
+Turn off LD filtering.
 
 =item B<noplot>
 
@@ -142,16 +158,15 @@ use warnings;
 
 use Config::IniFiles;
 use Cwd;
-use Storable;
 use Getopt::Long;
 use File::Basename;
 use Pod::Usage;
 
 use lib "lib";
 
-
-my ($bkgd, $data, $peaks, $label, $file, $format, $min_snps, $bkgrdstat, $noplot, $reps, $help, $man, $thresh, @snplist);
+my ($bkgd, $data, $peaks, $label, $file, $format, $min_snps, $bkgrdstat, $noplot, $reps, $help, $man, $thresh, $ld, $nold, $filter, @snplist);
 my ($datadir, $dsn, $rlibs, $user, $pass, $output);
+
 
 GetOptions (
     'data=s'     => \$data,
@@ -165,6 +180,9 @@ GetOptions (
     'noplot'     => \$noplot,
     'reps=i'     => \$reps,
     'thresh=s'   => \$thresh,
+    'ld=f'       => \$ld,
+    'nold'       => \$nold,
+    'filter=f'   => \$filter,
     'help|h|?'   => \$help,
     'man|m'      => \$man,
     'datadir=s'  => \$datadir, # e.g /usr/local/forge/
@@ -175,6 +193,7 @@ GetOptions (
 
 pod2usage(1) if ($help);
 pod2usage(-verbose => 2) if ($man);
+
 my $dirname = dirname(__FILE__);
 my $cfg = Config::IniFiles->new( -file => "$dirname/forge.ini" );
 
@@ -205,6 +224,8 @@ my $forge = Bio::Analysis::Forge->new(
 	'reps'       => $reps,
 	'thresh'     => $thresh,
 	'min_snps'   => $min_snps,	
+	'nold'       => $nold,
+	'ld'         => $ld,
     });
 
 $forge or die "System error: Failed to initialise Forge analysis.";
