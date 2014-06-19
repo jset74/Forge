@@ -154,19 +154,21 @@ Ian Dunham <dunham@ebi.ac.uk>
 use strict;
 use 5.010;
 use warnings;
-
-
-use Config::IniFiles;
+use DBI;
+use Sort::Naturally;
 use Cwd;
 use Getopt::Long;
 use File::Basename;
+use Config::IniFiles;
 use Pod::Usage;
+use Scalar::Util qw(looks_like_number);
+use Forge::Stats;
+use Forge::Plot;
+use Forge::Forge;
 
-use lib "lib";
+my $cwd = getcwd;
 
 my ($bkgd, $data, $peaks, $label, $file, $format, $min_snps, $bkgrdstat, $noplot, $reps, $help, $man, $thresh, $ld, $nold, $filter, @snplist);
-my ($datadir, $dsn, $rlibs, $user, $pass, $output);
-
 
 GetOptions (
     'data=s'     => \$data,
@@ -185,57 +187,94 @@ GetOptions (
     'filter=f'   => \$filter,
     'help|h|?'   => \$help,
     'man|m'      => \$man,
-    'datadir=s'  => \$datadir, # e.g /usr/local/forge/
-    'dsn=s'      => \$dsn, # e.g dbi:SQLite:/usr/local/forge/forge.db
-    'rlibs=s'     => \$rlibs, # e.g /usr/local/libs/R
-    'out=s'      => \$output, # e.g /tmp
+
 );
 
 pod2usage(1) if ($help);
 pod2usage(-verbose => 2) if ($man);
 
+# the minimum number of snps allowed for test. Set to 5 now we have binomial p?
+unless (defined $min_snps){
+    $min_snps = 5;
+}
+# define which data we are dealing with for the bitstrings, erc or encode
+unless (defined $data ){
+    $data = "erc";
+}
+# Label for plots
+unless (defined $label){
+    $label = "No label given";
+}
+(my $lab = $label) =~ s/\s/_/g;
+$lab = "$lab.$data";
+#format for reading from file
+unless (defined $format){
+    $format = 'rsid';
+}
+
+# Read the config file, forge.ini
 my $dirname = dirname(__FILE__);
 my $cfg = Config::IniFiles->new( -file => "$dirname/forge.ini" );
+my $datadir = $cfg->val('Files', 'datadir');
 
-$datadir ||= $cfg->val('Data', 'datadir');
-$dsn ||= $cfg->val('Data', 'dsn');
-$user ||= $cfg->val('Data', 'user');
-$pass ||= $cfg->val('Data', 'pass');
+# percentile bins for the bkgrd calculations. This is hard coded so there are enough SNPs to choose from, but could later be altered.
+my $per = 10;
+# number of sets to analyse for bkgrd.
+unless (defined $reps){
+    $reps = 1000;
+}
+# Which arrays to use for background
+unless (defined $bkgd){
+    $bkgd = "gwas";
+}
+# Define the thresholds to use.
+my ($t1, $t2);
+if (defined $thresh){
+    ($t1, $t2) = split(",", $thresh);
+    unless (looks_like_number($t1) && looks_like_number($t2)){
+        die "You must specify numerical pvalue thresholds in a comma separated list";
+    }
+}
+else{
+    $t1 = 0.05; # set binomial p values, bonferroni is applied later based on number of samples (cells)
+    $t2 = 0.01;
+}
 
-$rlibs ||= $cfg->val('Files', 'rlibs');
+# Set r2 LD thresholds
+my $r2;
+unless (defined $nold){
+    unless (defined $ld){
+        $ld = 0.8;
+    }
+    unless ($ld == 0.1 || $ld == 0.8){
+        die "You have specified LD filtering, but given an invalid value $ld. the format is ld 0.0, ld 0.8, or ld 0.1";
+    }
+    ($r2 = $ld) =~ s /\.//;
+    $r2 = "r".$r2;
+}
 
-$output ||= $cfg->val('Files', 'output') || getcwd;
-
-use Bio::Analysis::Forge;
-
-my $forge = Bio::Analysis::Forge->new(
-    {
-        'output'     => $output,
-        'r_libs'     => $rlibs,
-        'datadir'    => $datadir, 
-	'dsn'        => $dsn,
-	'user'       => $user,
-	'pass'       => $pass,
-	'noplot'     => $noplot,
-	'label'      => $label,
-        'data'       => $data,
-        'peaks'      => $peaks,
-        'bkgrdstat'  => $bkgrdstat,
-	'reps'       => $reps,
-	'thresh'     => $thresh,
-	'min_snps'   => $min_snps,	
-	'nold'       => $nold,
-	'ld'         => $ld,
-    });
-
-$forge or die "System error: Failed to initialise Forge analysis.";
-
+my $dsn;
+if (defined $peaks){
+    $dsn = "dbi:SQLite:dbname=" . $datadir . "forge_peaks.db";
+}
+else{
+    $dsn = "dbi:SQLite:dbname=" . $datadir . "forge.db";
+}
+my $dbh = DBI->connect($dsn, "", "") or die $DBI::errstr;
 # snps need to come either from a file or a list
 my @snps;
 
 # A series of data file formats to accept.
+
 if (defined $file){
-    @snps = @{$forge->parse_input($file, $format) || []};
+    if (defined $filter) {
+        unless ($format eq "ian" or $format eq "rsid"){
+            warn "You have specified pvalue filtering, but this isn't implemented for files of format $format. No filtering will happen."
+        }
+    }
+    my $sth = $dbh->prepare("SELECT rsid FROM bits WHERE location = ?");
+    open my $fh, "<", $file or die "cannot open file $file : $!";
+    @snps = process_file($fh, $format, $sth, $filter);
 }
 elsif (@snplist){
     @snps = split(/,/,join(',',@snplist));
@@ -247,9 +286,187 @@ else{
     @snps = qw(rs2865531 rs2395730 rs12914385 rs11168048 rs1529672 rs357394 rs13147758 rs3769124 rs2647044 rs12504628 rs1541374 rs2869967 rs1928168 rs3094548 rs3867498 rs9978142 rs4762767 rs6903823 rs11172113 rs9310995 rs2571445 rs2070600 rs11727189 rs3734729 rs2906966 rs1036429 rs16909898 rs3995090 rs12477314 rs2544527 rs2284746 rs993925 rs2277027 rs1344555 rs1455782 rs2855812 rs2838815 rs11001819 rs12716852 rs2798641 rs4129267 rs7068966 rs12899618 rs153916 rs1551943 rs730532 rs1980057 rs3820928 rs2036527 rs10516526 rs2857595 rs3817928 rs310558 rs808225 rs12447804);
 }
 
-if (my $jobid = $forge->run(\@snps)) {
-    warn "Done . Results are in $output/$jobid \n";
-} else {
-    warn "Error : ",$forge->error, "\n";
+# Remove redundancy in the input
+
+my %nonredundant;
+foreach my $snp (@snps){
+    $nonredundant{$snp}++;
+}
+foreach my $snp (keys %nonredundant){
+    if ($nonredundant{$snp} > 1) {
+        say "$snp is present " . $nonredundant{$snp} . " times in the input. Analysing only once."
+    }
+}
+@snps = keys %nonredundant;
+my @origsnps = @snps;
+
+# Perform ld filter unless -nold is specified.
+
+my ($ld_excluded, $output, $input);
+unless (defined $nold) {
+    $input = scalar @snps;
+    ($ld_excluded, @snps) = ld_filter(\@snps, $r2, $dbh);
+    $output = scalar @snps;
+    #say join("\t", @snps);
 }
 
+# Check we have enough SNPs
+if (scalar @snps < $min_snps){
+    pod2usage(-verbose => 2, -message => "Fewer than $min_snps SNPs. Analysis not run\n\n", -noperldoc => 1);
+}
+
+# get the cell list array and the hash that connects the cells and tissues
+my ($cells, $tissues) = get_cells($data, $dbh);
+
+# get the bit strings for the test snps from the database file
+my $rows = get_bits(\@snps, $dbh);
+
+# unpack the bitstrings and store the overlaps by cell.
+my $test = process_bits($rows, $cells, $data);
+
+# generate stats on the background selection
+if (defined $bkgrdstat){
+    bkgrdstat($test, $lab, "test");
+}
+
+# Identify SNPs that weren't found and warn about them.
+my @missing;
+foreach my $rsid (@origsnps){
+    if (defined $ld) {
+        next if exists $$ld_excluded{$rsid}; # if the snps are not in the 1000 genomes set they will not be found by the LD filter, so we have to recheck here.
+    }
+    unless (exists $$test{'SNPS'}{$rsid}){
+        push @missing, $rsid;
+    }
+}
+
+if (scalar @missing > 0) {
+    print "The following " . scalar @missing . " SNPs have not been analysed because they were not found in the 1000 genomes phase 1 integrated call data\n";
+    print join("\n", @missing) . "\n";
+}
+if (defined $ld) {
+    if ($output < $input) {
+        say "For $label, $input SNPs provided, " . scalar @snps . " retained, " . scalar @missing . " not analysed, "  . scalar(keys %$ld_excluded) . " LD filtered at $ld,";
+    }
+}
+
+# only pick background snps matching snps that had bitstrings originally.
+my @foundsnps = keys %{$$test{'SNPS'}};
+my $snpcount = scalar @foundsnps;
+print "Test SNPs analysed $snpcount\n";
+
+# identify the gc, maf and tss, and then make bkgrd picks
+my $picks = match(\%$test, $bkgd, $datadir, $per, $reps);
+
+# for bkgrd set need to get distribution of counts instead
+# make a hash of data -> cell -> bkgrd-Set -> overlap counts
+my %bkgrd; #this hash is going to store the bkgrd overlaps
+
+# Get the bits for the background sets and process
+my $backsnps;
+
+foreach my $bkgrd (keys %{$picks}){
+    #$rows = get_bits(\@{$$picks{$bkgrd}}, $sth);
+    $rows = get_bits(\@{$$picks{$bkgrd}}, $dbh);
+    $backsnps += scalar @$rows; #$backsnps is the total number of background SNPs analysed
+    unless (scalar @$rows == scalar @foundsnps){
+        print "Background " . $bkgrd . " only " . scalar @$rows . " SNPs out of " . scalar @foundsnps . "\n";
+    }
+    my $result = process_bits($rows, $cells, $data);
+    foreach my $cell (keys %{$$result{'CELLS'}}){
+        push @{$bkgrd{$cell}}, $$result{'CELLS'}{$cell}{'COUNT'}; # accumulate the overlap counts by cell
+    }
+    if (defined $bkgrdstat){
+        bkgrdstat($result, $lab, $bkgrd);
+    }
+}
+
+$dbh->disconnect();
+
+#Having got the test overlaps and the bkgd overlaps now calculate Zscores and output the table to be read into R for plotting.
+my $time = time(); # time is used to label the output directories.
+my $resultsdir;
+if (defined $peaks){
+    $resultsdir = "$cwd/$lab.peaks.$time";
+}
+else{
+    $resultsdir = "$cwd/$lab.$time";
+}
+mkdir $resultsdir;
+my $filename = "$lab.chart.tsv";
+open my $ofh, ">", "$resultsdir/$filename" or die "Cannot open $resultsdir/$filename: $!"; #should grab a process number for unique name here
+print $ofh join("\t", "Zscore", "Pvalue", "Cell", "Tissue", "File", "SNPs", "Number", "Accession") ."\n";
+
+my $n = 1;
+my $pos = 0;
+
+my %tissuecount;
+foreach my $cell (keys %$tissues){
+    my $tissue = $$tissues{$cell}{'tissue'};
+    $tissuecount{$tissue}++;
+}
+
+my $tissuecount = scalar keys %tissuecount;
+$t1 = $t1/$tissuecount; # bonferroni correction by number of tissues
+$t2 = $t2/$tissuecount;
+
+$t1 = -log10($t1);
+$t2 = -log10($t2);
+
+open my $bfh, ">", "background.tsv" or die "Cannot open background.tsv";
+
+foreach my $cell (sort {ncmp($$tissues{$a}{'tissue'},$$tissues{$b}{'tissue'}) || ncmp($a,$b)} @$cells){ # sort by the tissues alphabetically (from $tissues hash values)
+    # ultimately want a data frame of names(results)<-c("Zscore", "Cell", "Tissue", "File", "SNPs")
+    say $bfh join("\t", @{$bkgrd{$cell}});
+    my $teststat = $$test{'CELLS'}{$cell}{'COUNT'}; #number of overlaps for the test SNPs
+
+    # binomial pvalue, probability of success is derived from the background overlaps over the tests for this cell
+    # $backsnps is the total number of background SNPs analysed
+    # $tests is the number of overlaps found over all the background tests
+    my $tests;
+    foreach (@{$bkgrd{$cell}}){
+        $tests+= $_;
+    }
+    my $p = sprintf("%.6f", $tests/$backsnps);
+
+    # binomial probability for $teststat or more hits out of $snpcount snps
+    # sum the binomial for each k out of n above $teststat
+    my $pbinom;
+    foreach my $k ($teststat .. $snpcount){
+        $pbinom += binomial($k, $snpcount, $p);
+    }
+    if ($pbinom >1) {
+        $pbinom = 1;
+    }
+    $pbinom = -log10($pbinom);
+    # Z score calculation
+    my $mean = mean(@{$bkgrd{$cell}});
+    my $sd = std(@{$bkgrd{$cell}});
+    my $zscore;
+    if ($sd == 0){
+        $zscore = "NA";
+    }
+    else{
+        $zscore = sprintf("%.3f", ($teststat-$mean)/$sd);
+    }
+    if ($pbinom >=$t2){
+        $pos++;
+    }
+    my $snp_string = "";
+    $snp_string = join(",", @{$$test{'CELLS'}{$cell}{'SNPS'}}) if defined $$test{'CELLS'}{$cell}{'SNPS'}; # This gives the list of overlapping SNPs for use in the tooltips. If there are a lot of them this can be a little useless
+    my ($shortcell, undef) = split('\|', $cell); # undo the concatenation from earlier to deal with identical cell names.
+    print $ofh join("\t", $zscore, $pbinom, $shortcell, $$tissues{$cell}{'tissue'}, $$tissues{$cell}{'file'}, $snp_string, $n, $$tissues{$cell}{'acc'}) . "\n";
+    $n++;
+}
+
+
+# fdr calculation isn't valid currently
+#my $fdr = fdr($pos, $snpcount, $cellcount);
+#say "$filename\t$pos positive lines at FDR = $fdr at Z >= 3.39";
+
+unless (defined $noplot){
+    #Plotting and table routines
+    Chart($filename, $lab, $resultsdir, $tissues, $cells, $label, $t1, $t2, $data); # basic pdf plot
+    dChart($filename, $lab, $resultsdir, $data, $label, $t1, $t2); # rCharts Dimple chart
+    table($filename, $lab, $resultsdir); # Datatables chart
+}
