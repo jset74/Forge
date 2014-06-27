@@ -9,6 +9,7 @@ use File::Path qw(make_path);
 use Data::Dumper;
 use Scalar::Util qw(looks_like_number);
 
+our $VERSION = '1.0';
 
 # percentile bins for the bkgrd calculations. This is hard coded so there are enough SNPs to choose from, but could later be altered.
 my $per = 10;
