@@ -230,7 +230,7 @@ sub run {
 
 	if (defined $self->ld) {
 	    if ($output < $input) {
-		$self->debug( "$input SNPs provided, " . scalar @snps . " retained, " . scalar @missing . " not analysed, "  . scalar(keys %$ld_excluded) . " LD filtered at ".$self->ld.".");
+		$self->debug( "$input SNPs provided, " . scalar @snps . " retained, " . scalar @missing . " not analysed, "  . scalar(keys %$ld_excluded) . " LD filtered at ".$self->ld.".\n");
 	    }
 	}
 
@@ -291,7 +291,7 @@ sub run {
 	    return;
 	}
 	
-	print $ofh join("\t", "Zscore", "Cell", "Tissue", "File", "SNPs", "Number", "Accession") ."\n";
+	print $ofh join("\t", "Zscore", "Pvalue", "Cell", "Tissue", "File", "SNPs", "Number", "Accession") ."\n";
 	my $n =1;
 	my $tissues = $self->tissues;
 	my $cells = $self->cells;
@@ -356,8 +356,7 @@ sub run {
 		$pos++;
 	    }
 	    my $snp_string = "";
-	    $snp_string = join(",", @{$$test{'CELLS'}{$cell}{'SNPS'}}) if defined $$test{'CELLS'}{$cell}{'SNPS'}; # This gives the list of overlapping SNPs for use in the tooltips. If there are \
-a lot of them this can be a little useless
+	    $snp_string = join(",", @{$$test{'CELLS'}{$cell}{'SNPS'}}) if defined $$test{'CELLS'}{$cell}{'SNPS'}; # This gives the list of overlapping SNPs for use in the tooltips. If there are a lot of them this can be a little useless
     my ($shortcell, undef) = split('\|', $cell); # undo the concatenation from earlier to deal with identical cell names.
 	    print $ofh join("\t", $zscore, $pbinom, $shortcell, $$tissues{$cell}{'tissue'}, $$tissues{$cell}{'file'}, $snp_string, $n, $$tissues{$cell}{'acc'}) . "\n";
 	    $n++;
@@ -722,8 +721,8 @@ sub table{
 
     print $rcfh "setwd(\"$Rdir\")
     data<-read.table(\"$filename\", header = TRUE, sep=\"\t\")
-    results<-data.frame(data\$Cell, data\$Tissue, data\$Accession, data\$Zscore, data\$SNPs)
-    names(results)<-c(\"Cell\", \"Tissue\", \"Accession\", \"Zscore\", \"SNPs\")
+    results<-data.frame(data\$Cell, data\$Tissue, data\$Accession, data\$Pvalue, data\$Zscore, data\$SNPs)
+    names(results)<-c(\"Cell\", \"Tissue\", \"Accession\", \"Pvalue\", \"Zscore\", \"SNPs\")
     require(rCharts)
     dt <- dTable(
       results,
@@ -738,7 +737,6 @@ sub table{
 
 sub debug {
     my ($self,$msg) = @_;
-    warn $msg;
     if ($self->logfile) {
 	if (open F, ">>".$self->logfile) {
 	    print F $msg;
@@ -749,7 +747,6 @@ sub debug {
 
 sub status {
     my ($self,$msg) = @_;
-#    warn $msg;
     my $sh = $self->sh;
     print $sh $msg;
 }
