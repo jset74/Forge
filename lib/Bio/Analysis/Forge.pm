@@ -75,6 +75,7 @@ sub new {
 	    warn "You have specified LD filtering, but given an invalid value $ld. the format is ld 0.0, ld 0.8, or ld 0.1";
 	    return undef;
 	}
+	$params->{ld} = $ld;
 	my $r2;
 	($r2 = $ld) =~ s /\.//;
 	$params->{r2} = "r".$r2;
@@ -212,7 +213,7 @@ sub run {
 	my @missing;
 	foreach my $rsid (@$snps){
 	    if (defined $self->ld) {
-		next if exists $$ld_excluded{$rsid}; # if the snps are not in the 1000 genomes set they will not be found by the LD filter, so we have to recheck here.
+		next if exists $ld_excluded->{$rsid}; # if the snps are not in the 1000 genomes set they will not be found by the LD filter, so we have to recheck here.
 	    }
 	    unless (exists $$test{'SNPS'}{$rsid}){
 		push @missing, $rsid;
