@@ -298,7 +298,7 @@ sub ld_filter{
         foreach my $ldsnp (@block){
             if (exists $snps{$ldsnp}) {
                 $ld_excluded{$ldsnp} = $snp; #Add to the excluded snps, if itis in an LD block with the current snp, and it its one of the test snps.
-                say "$ldsnp excluded for LD at >= $r2 with $snp";
+                warn "$ldsnp excluded for LD at >= $r2 with $snp";
             }
         }
     }

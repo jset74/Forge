@@ -57,7 +57,7 @@ sub new {
     $str .= $chars[rand @chars] for 1..4;
     $params->{_jobid} = "forge/$str/".time;
 
-
+    $params->{version} = $VERSION;
     $params->{min_snps} ||= 5;
     $params->{repetitions} ||= 100;
 
@@ -180,7 +180,7 @@ sub run {
     my ($ld_excluded, $output, $input);
     unless (defined $self->nold) {
 	$input = scalar @snps;
-	($ld_excluded, @snps) = ld_filter(\@snps, $self->r2, $self->dbh);
+	($ld_excluded, @snps) = $self->ld_filter(\@snps, $self->r2, $self->dbh);
 	$output = scalar @snps;
     }
 
@@ -230,7 +230,7 @@ sub run {
 
 	if (defined $self->ld) {
 	    if ($output < $input) {
-		self->debug("For ".$self->label.", $input SNPs provided, " . scalar @snps . " retained, " . scalar @missing . " not analysed, "  . scalar(keys %$ld_excluded) . " LD filtered at ".$self->ld.".");
+		$self->debug( "$input SNPs provided, " . scalar @snps . " retained, " . scalar @missing . " not analysed, "  . scalar(keys %$ld_excluded) . " LD filtered at ".$self->ld.".");
 	    }
 	}
 
@@ -749,7 +749,7 @@ sub debug {
 
 sub status {
     my ($self,$msg) = @_;
-    warn $msg;
+#    warn $msg;
     my $sh = $self->sh;
     print $sh $msg;
 }
@@ -816,6 +816,39 @@ sub parse_input {
     }
 
     return \@snps;
+}
+
+sub ld_filter{
+    #@snps = ld_filter(@snps, $ld, $dbh);
+    my ($self, $snps, $r2) = @_;
+    my $dbh = $self->dbh;
+
+    my %ld_excluded; # a hash to store SNPs found in LD with a SNP in the list
+    my @snps_filtered; # The list of SNPs filtered
+    my %snps;
+    foreach my $snp (@$snps){
+        $snps{$snp} = 1;
+    }
+    my $args = join ("','", @$snps);
+
+    my $sth = $dbh->prepare("SELECT rsid,$r2 FROM ld WHERE rsid IN ('$args')"); #get the blocks form the ld table
+    $sth->execute();
+    my $result = $sth->fetchall_arrayref();
+    $sth->finish();
+    foreach my $row (@{$result}){
+        my ($snp, $block) = @$row;
+        next if exists $ld_excluded{$snp}; # if the snp is in the ld filtered set already ignore it
+        push @snps_filtered, $snp; # if thisis the first time it is seen, add it to the filtered snps, and remove anything in LD with it
+        next if $block =~ /NONE/; # nothing is in LD
+        my (@block) = split (/\|/, $block);
+        foreach my $ldsnp (@block){
+            if (exists $snps{$ldsnp}) {
+                $ld_excluded{$ldsnp} = $snp; #Add to the excluded snps, if itis in an LD block with the current snp, and it its one of the test snps.
+                $self->debug( "$ldsnp excluded for LD at >= $r2 with $snp.\n");
+            }
+        }
+    }
+    return (\%ld_excluded, @snps_filtered);#note that if a SNP doesn't exist in the ld file it will be rejected regardless, may need to add these back
 }
 
 1;
