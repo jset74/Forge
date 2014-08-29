@@ -591,7 +591,7 @@ palette(c(\"$ns\",\"$msig\",\"$sig\"))
 ymin1 = min(results\$Pvalue, na.rm=TRUE)*1.1
 ymax1 = max(results\$Pvalue, na.rm=TRUE)*1.1
 ymax = max(c(abs(ymin1),ymax1))
-ymin = -ymax
+ymin = -ymin1
 par(mar=c(9,4,3,1)+0.1)
 plot(results\$Pvalue,ylab=\"-log10 binomial P\",xlab=\"\",main=\"SNPs in DNase1 sites (probably TF sites) in cell lines for $label\",ylim=c(ymin,ymax), las=2, las=2, pch=19,col=results\$Class, xaxt='n')
 axis(1, seq(1,length(results\$Cell)),labels=results\$Cell, las=2, cex.axis=0.7)
