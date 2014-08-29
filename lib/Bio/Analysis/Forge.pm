@@ -15,8 +15,6 @@ use Forge::Forge; # ld_filter . need to use all functions from plot and forge
 our $VERSION = '1.1';
 # percentile bins for the bkgrd calculations. This is hard coded so there are enough SNPs to choose from, but could later be altered.
 my $per = 10;
-# number of sets to analyse for bkgrd. Again currently hardcoded to 1000
-my $reps = 1000;
 
 # internal
 sub  tissues :lvalue { $_[0]->{'_tissues'}; }
@@ -41,7 +39,10 @@ sub  r_libs :lvalue { $_[0]->{'r_libs'}; }
 
 sub  t1 :lvalue { $_[0]->{'tmin'}; }
 sub  t2 :lvalue { $_[0]->{'tmax'}; }
+
+# number of sets to analyse for bkgrd. Again currently hardcoded to 1000
 sub  repetitions :lvalue { $_[0]->{'repetitions'}; }
+
 sub  bkgrdstat :lvalue { $_[0]->{'bkgrdstat'}; }
 
 sub r2 :lvalue { $_[0]->{'r2'}; }
@@ -177,14 +178,12 @@ sub run {
     my @snps = keys %nonredundant;
 
 # Perform ld filter unless -nold is specified.
-
     my ($ld_excluded, $output, $input);
     unless (defined $self->nold) {
 	$input = scalar @snps;
 	($ld_excluded, @snps) = $self->ld_filter(\@snps, $self->r2, $self->dbh);
 	$output = scalar @snps;
     }
-
 
     eval {
 	$self->get_cells();
@@ -207,7 +206,7 @@ sub run {
 	    print $bfh join("\t", "test", "tss", @tss);
 	    print $bfh join("\t", "test", "gc", @gc);
 	}
-    
+
 
 # Identify SNPs that weren't found and warn about them.
 	my @missing;
@@ -235,9 +234,9 @@ sub run {
 	    }
 	}
 
-	
 # identify the gc, maf and tss, and then make bkgrd picks
 	my $picks = $self->match(\%$test);
+
 
 # for bgrd set need to get distribution of counts instead
 # make a hash of data -> cell -> bkgrd-Set -> overlap counts
@@ -263,8 +262,6 @@ sub run {
 		push @{$bkgrd{$cell}}, $$result{'CELLS'}{$cell}{'COUNT'}; # accumulate the overlap counts by cell
 	    }
 	    $self->status( sprintf("RUNNING#%d\n", $ic++ / $num * 100) ) ;
-
-
 	    if ($self->bkgrdstat){
 		open my $bfh, ">", "$folder/bkgrd.stats" or die "cannot open $folder/bkgrd.stats";
 		my (@maf, @tss, @gc);
@@ -430,6 +427,7 @@ sub match{
 
     my $num2 = keys %{$$snps{'SNPS'}};
     my $iic = 0;
+    my $reps = $self->repetitions;
 
     foreach my $rs (keys %{$$snps{'SNPS'}}){
 	$self->status (sprintf("LOAD#%d\n", $iic++ / $num2 * 80 + 20));
@@ -546,6 +544,9 @@ sub Chart{
     my $chart = "chart.pdf";
     my $rfile = $Rdir. "/chart.R";
 
+   #set some colors
+    my ($sig, $msig, $ns, $abline, $tline) = qw(red palevioletred1 steelblue3 lightpink1 burlywood3); #alternate msig = pink2
+
     # make plot, first calculate where dividing lines are:
     my (@lines, @label_pos, @labels, @tissue_txt);
     my $n =1;
@@ -579,28 +580,26 @@ sub Chart{
     if (my $rlib = $self->r_libs) {
         print $rfh ".libPaths(\"$rlib\")\n";
     }
+    $t1 = sprintf("%.2f", $t1);
+    $t2 = sprintf("%.2f", $t2);
 
     print $rfh "setwd(\"$Rdir\")
 results<-read.table(\"$filename\",header=TRUE,sep=\"\t\")
-results\$Class<-cut(results\$Zscore, breaks =c(min(results\$Zscore), $t1, $t2, max(results\$Zscore)), labels=FALSE, include.lowest=TRUE) # 99.9 and 99% CIs 1, 2, 3
+results\$Class<-cut(results\$Pvalue, breaks =c(min(results\$Pvalue), $t1, $t2, max(results\$Pvalue)), labels=FALSE, include.lowest=TRUE) 
 pdf(\"$chart\", width=22.4, height=7)
-palette(c(\"steelblue3\",\"pink2\",\"red\"))
-ymin1 = min(results\$Zscore, na.rm=TRUE)*1.1
-ymax1 = max(results\$Zscore, na.rm=TRUE)*1.1
+palette(c(\"$ns\",\"$msig\",\"$sig\"))
+ymin1 = min(results\$Pvalue, na.rm=TRUE)*1.1
+ymax1 = max(results\$Pvalue, na.rm=TRUE)*1.1
 ymax = max(c(abs(ymin1),ymax1))
 ymin = -ymax
 par(mar=c(9,4,3,1)+0.1)
-plot(results\$Zscore,ylab=\"Z score\",xlab=\"\",main=\"Proportion of SNPs, DNase1 sites (probably TF sites) which are present in cell lines for $label\",ylim=c(ymin,ymax), las=2, las=2, pch=19,col=results\$Class, xaxt='n')
+plot(results\$Pvalue,ylab=\"-log10 binomial P\",xlab=\"\",main=\"SNPs in DNase1 sites (probably TF sites) in cell lines for $label\",ylim=c(ymin,ymax), las=2, las=2, pch=19,col=results\$Class, xaxt='n')
 axis(1, seq(1,length(results\$Cell)),labels=results\$Cell, las=2, cex.axis=0.7)
 mtext(1,text=\"Cell\",line=7,cex=1.2)
-#abline(h=-$t1, col=\"lightpink1\") # Z score of 2.58 = 99 % probability
-abline(h=$t1, col=\"lightpink1\")
-#abline(h=-$t2, col=\"lightpink1\", lty=2)
-abline(h=$t2, col=\"lightpink1\", lty=2)
-text(c(-1),$t1+0.2,c(\"Z = $t1\"),col=\"lightpink1\",adj=1,cex=0.8)
-#text(c(-1),-$t1+0.16,c(\"1%\"),col=\"lightpink1\",adj=1,cex=0.8)
-text(c(-1),$t2+0.2,c(\"Z = $t2\"),col=\"lightpink1\",adj=1,cex=0.8)
-#text(c(-1),-$t2+0.16,c(\"0.1%\"),col=\"lightpink1\",adj=1,cex=0.8)
+abline(h=$t1, col=\"$abline\")
+abline(h=$t2, col=\"$abline\", lty=2)
+text(c(-0.5),$t1+0.2,c(\"P = $t1\"),col=\"$abline\",adj=1,cex=0.8)
+text(c(-0.5),$t2+0.2,c(\"P = $t2\"),col=\"$abline\",adj=1,cex=0.8)
 palette(\"default\")\n";
 
     foreach my $pos (@lines){
@@ -608,7 +607,7 @@ palette(\"default\")\n";
     }
     $index = 0;
     foreach my $tissue (@labels){
-        print $rfh "text(c(" . $label_pos[$index] . "),ymax,c(\"" . $tissue . "\"),col=\"burlywood3\",adj=1,srt=90,cex=0.8)\n";
+	print $rfh "text(c(" . $label_pos[$index] . "),ymax,c(\"" . $tissue . "\"),col=\"$tline\",adj=1,srt=90,cex=0.8)\n";
         $index++;
     }
     print $rfh "dev.off()\n";
@@ -674,11 +673,11 @@ sub dChart{
 
     print $rcfh "setwd(\"$Rdir\")
 results<-read.table(\"$filename\", header = TRUE, sep=\"\t\")
-results\$Class<-cut(results\$Zscore, breaks =c(min(results\$Zscore), $t1, $t2, max(results\$Zscore)), labels=FALSE, include.lowest=TRUE) # 99.9 and 99% CIs 1, 2, 3
+results\$Class<-cut(results\$Pvalue, breaks =c(min(results\$Pvalue), $t1, $t2, max(results\$Pvalue)), labels=FALSE, include.lowest=TRUE) # 99.9 and 99% CIs 1, 2, 3
 require(rCharts)
 d1 <- dPlot(
-  y = \"Zscore\",
-  x = c(\"Cell\", \"Tissue\", \"SNPs\", \"Number\", \"Accession\"),
+  y = \"Pvalue\",
+  x = c(\"Cell\", \"Tissue\", \"SNPs\", \"Number\", \"Accession\", \"Pvalue\", \"Zscore\"),
   groups = \"Class\",
   data = results,
   type = \"bubble\",
