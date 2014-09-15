@@ -243,7 +243,10 @@ sub run {
 
 # identify the gc, maf and tss, and then make bkgrd picks
 	my $picks = $self->match(\%$test) unless ($self->overlap);
-
+if ($self->overlap) {
+	$self->status (sprintf("LOAD#%d\n", 100));
+  sleep(1);
+}
 
 # for bgrd set need to get distribution of counts instead
 # make a hash of data -> cell -> bkgrd-Set -> overlap counts
