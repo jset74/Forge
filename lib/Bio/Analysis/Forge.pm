@@ -49,6 +49,9 @@ sub r2 :lvalue { $_[0]->{'r2'}; }
 sub nold :lvalue { $_[0]->{'nold'}; }
 sub ld :lvalue { $_[0]->{'ld'}; }
 
+sub overlap :lvalue { $_[0]->{'overlap'}; }
+
+
 # Constructor - requires location of the forge data as DSN string and directory with forge settings
 sub new {
     my ($class, $params) = @_;
@@ -69,6 +72,10 @@ sub new {
     $params->{tmin} ||= 0.01;
     $params->{tmax} ||= 0.05;
 
+    if ($params->{overlap}) {
+	$params->{nold} = 1;
+	$params->{min_snps} = 1;
+    }
 # Set r2 LD thresholds
     unless (defined $params->{nold}){
 	my $ld = $params->{ld} || 0.8;
@@ -235,7 +242,7 @@ sub run {
 	}
 
 # identify the gc, maf and tss, and then make bkgrd picks
-	my $picks = $self->match(\%$test);
+	my $picks = $self->match(\%$test) unless ($self->overlap);
 
 
 # for bgrd set need to get distribution of counts instead
@@ -249,34 +256,35 @@ sub run {
 # Get the bits for the background sets and process
 	my $backsnps;
 
-	foreach my $bkgrd (keys %{$picks}){
-	    $rows = $self->get_bits(\@{$$picks{$bkgrd}});
-	    $backsnps += scalar @$rows; #$backsnps is the total number of background SNPs analysed
-
-	    unless (scalar @$rows == scalar @foundsnps){
-		$self->debug("Background " . $bkgrd . " only " . scalar @$rows . " SNPs out of " . scalar @foundsnps . "\n");
-	    }
-	    
-	    my $result = $self->process_bits($rows);
-	    foreach my $cell (keys %{$$result{'CELLS'}}){
-		push @{$bkgrd{$cell}}, $$result{'CELLS'}{$cell}{'COUNT'}; # accumulate the overlap counts by cell
-	    }
-	    $self->status( sprintf("RUNNING#%d\n", $ic++ / $num * 100) ) ;
-	    if ($self->bkgrdstat){
-		open my $bfh, ">", "$folder/bkgrd.stats" or die "cannot open $folder/bkgrd.stats";
-		my (@maf, @tss, @gc);
-		foreach my $rsid (keys %{$$test{'SNPS'}}){
-		    my ($maf, $tss, $gc) = split "\t", $$test{'SNPS'}{$rsid}{'PARAMS'};
-		    push @maf, $maf;
-		    push @tss, $tss;
-		    push @gc, $gc;
+	if (defined $picks) {
+	    foreach my $bkgrd (keys %{$picks}){
+		$rows = $self->get_bits(\@{$$picks{$bkgrd}});
+		$backsnps += scalar @$rows; #$backsnps is the total number of background SNPs analysed
+		
+		unless (scalar @$rows == scalar @foundsnps){
+		    $self->debug("Background " . $bkgrd . " only " . scalar @$rows . " SNPs out of " . scalar @foundsnps . "\n");
 		}
-		print $bfh join("\t", "test", "maf", @maf);
-		print $bfh join("\t", "test", "tss", @tss);
-		print $bfh join("\t", "test", "gc", @gc);
+	    
+		my $result = $self->process_bits($rows);
+		foreach my $cell (keys %{$$result{'CELLS'}}){
+		    push @{$bkgrd{$cell}}, $$result{'CELLS'}{$cell}{'COUNT'}; # accumulate the overlap counts by cell
+		}
+		$self->status( sprintf("RUNNING#%d\n", $ic++ / $num * 100) ) ;
+		if ($self->bkgrdstat){
+		    open my $bfh, ">", "$folder/bkgrd.stats" or die "cannot open $folder/bkgrd.stats";
+		    my (@maf, @tss, @gc);
+		    foreach my $rsid (keys %{$$test{'SNPS'}}){
+			my ($maf, $tss, $gc) = split "\t", $$test{'SNPS'}{$rsid}{'PARAMS'};
+			push @maf, $maf;
+			push @tss, $tss;
+			push @gc, $gc;
+		    }
+		    print $bfh join("\t", "test", "maf", @maf);
+		    print $bfh join("\t", "test", "tss", @tss);
+		    print $bfh join("\t", "test", "gc", @gc);
+		}
 	    }
 	}
-
 	$self->dbh->disconnect();
 	$self->status( "RESULTS#0\n");
 
@@ -288,8 +296,11 @@ sub run {
 	    $self->error = "ERROR: Cannot open $filename: $!"; 
 	    return;
 	}
-	
-	print $ofh join("\t", "Zscore", "Pvalue", "Cell", "Tissue", "File", "SNPs", "Number", "Accession") ."\n";
+	if (defined $self->overlap) {
+	    print $ofh join("\t", "Cell", "Tissue", "File", "SNPs", "Number", "Accession") ."\n";
+	} else {
+	    print $ofh join("\t", "Zscore", "Pvalue", "Cell", "Tissue", "File", "SNPs", "Number", "Accession") ."\n";
+	}
 	my $n =1;
 	my $tissues = $self->tissues;
 	my $cells = $self->cells;
@@ -317,6 +328,10 @@ sub run {
 	
 	foreach my $cell (sort {ncmp($$tissues{$a}{'tissue'},$$tissues{$b}{'tissue'}) || ncmp($a,$b)} @$cells){ # sort by the tissues alphabetically (from $tissues hash values)
     # ultimately want a data frame of names(results)<-c("Zscore", "Cell", "Tissue", "File", "SNPs")
+	    my $snp_string = "";
+	    $snp_string = join(",", @{$$test{'CELLS'}{$cell}{'SNPS'}}) if defined $$test{'CELLS'}{$cell}{'SNPS'}; # This gives the list of overlapping SNPs for use in the tooltips. If there are a lot of them this can be a little useless
+	    my ($shortcell, undef) = split('\|', $cell); # undo the concatenation from earlier to deal with identical cell names.
+
 	    print $bfh join("\t", @{$bkgrd{$cell}});
 
 	    my $teststat = $$test{'CELLS'}{$cell}{'COUNT'}; #number of overlaps for the test SNPs
@@ -324,39 +339,41 @@ sub run {
     # binomial pvalue, probability of success is derived from the background overlaps over the tests for this cell
     # $backsnps is the total number of background SNPs analysed
     # $tests is the number of overlaps found over all the background tests
-	    my $tests;
-	    foreach (@{$bkgrd{$cell}}){
-		$tests+= $_;
-	    }
-	    my $p = sprintf("%.6f", $tests/$backsnps);
+	    if (defined $self->overlap){
+		print $ofh join("\t", $shortcell, $$tissues{$cell}{'tissue'}, $$tissues{$cell}{'file'}, $snp_string, $n, $$tissues{$cell}{'acc'}) . "\n";
+	    } else{
+		my $tests;
+		foreach (@{$bkgrd{$cell}}){
+		    $tests+= $_;
+		}
+		my $p = sprintf("%.6f", $tests/$backsnps);
 
     # binomial probability for $teststat or more hits out of $snpcount snps
     # sum the binomial for each k out of n above $teststat
-	    my $pbinom;
-	    foreach my $k ($teststat .. $snpcount){
-		$pbinom += binomial($k, $snpcount, $p);
-	    }
-	    if ($pbinom >1) {
-		$pbinom = 1;
-	    }
-	    $pbinom = -log10($pbinom);
+		my $pbinom;
+		foreach my $k ($teststat .. $snpcount){
+		    $pbinom += binomial($k, $snpcount, $p);
+		}
+		if ($pbinom >1) {
+		    $pbinom = 1;
+		}
+		$pbinom = -log10($pbinom);
     # Z score calculation
-	    my $mean = mean(@{$bkgrd{$cell}});
-	    my $sd = std(@{$bkgrd{$cell}});
-	    my $zscore;
-	    if ($sd == 0){
-		$zscore = "NA";
+		my $mean = mean(@{$bkgrd{$cell}});
+		my $sd = std(@{$bkgrd{$cell}});
+		my $zscore;
+		if ($sd == 0){
+		    $zscore = "NA";
+		}
+		else{
+		    $zscore = sprintf("%.3f", ($teststat-$mean)/$sd);
+		}
+		if ($pbinom >= $self->t2){
+		    $pos++;
+		}
+
+		print $ofh join("\t", $zscore, $pbinom, $shortcell, $$tissues{$cell}{'tissue'}, $$tissues{$cell}{'file'}, $snp_string, $n, $$tissues{$cell}{'acc'}) . "\n";
 	    }
-	    else{
-		$zscore = sprintf("%.3f", ($teststat-$mean)/$sd);
-	    }
-	    if ($pbinom >= $self->t2){
-		$pos++;
-	    }
-	    my $snp_string = "";
-	    $snp_string = join(",", @{$$test{'CELLS'}{$cell}{'SNPS'}}) if defined $$test{'CELLS'}{$cell}{'SNPS'}; # This gives the list of overlapping SNPs for use in the tooltips. If there are a lot of them this can be a little useless
-    my ($shortcell, undef) = split('\|', $cell); # undo the concatenation from earlier to deal with identical cell names.
-	    print $ofh join("\t", $zscore, $pbinom, $shortcell, $$tissues{$cell}{'tissue'}, $$tissues{$cell}{'file'}, $snp_string, $n, $$tissues{$cell}{'acc'}) . "\n";
 	    $n++;
 	}
 
@@ -371,10 +388,12 @@ sub run {
 	unless (defined $self->noplot){
 	    $self->label ||= $self->jobid;
 	    #Plotting and table routines
-	    $self->status( "RESULTS#10\n" );
-	    $self->Chart($filename); # basic pdf plot
-	    $self->status( "RESULTS#20\n" );
-	    $self->dChart($filename); # rCharts Dimple chart
+	    unless (defined $self->overlap) {
+		$self->status( "RESULTS#10\n" );
+		$self->Chart($filename); # basic pdf plot
+		$self->status( "RESULTS#20\n" );
+		$self->dChart($filename); # rCharts Dimple chart
+	    }
 	    $self->status("RESULTS#60\n");
 	    $self->table($filename); # Datatables chart
 	}
@@ -711,6 +730,7 @@ sub table{
     my $Rdir = $self->output.'/'.$self->jobid;
     my $t1 = $self->t1;
     my $t2 = $self->t2;
+    my $overlap = $self->overlap;
 
 
     my $rfile = "$Rdir/table.R";
@@ -720,10 +740,16 @@ sub table{
     }
 
     print $rcfh "setwd(\"$Rdir\")
-    data<-read.table(\"$filename\", header = TRUE, sep=\"\t\")
-    results<-data.frame(data\$Cell, data\$Tissue, data\$Accession, data\$Pvalue, data\$Zscore, data\$SNPs)
-    names(results)<-c(\"Cell\", \"Tissue\", \"Accession\", \"Pvalue\", \"Zscore\", \"SNPs\")
-    require(rCharts)
+    data<-read.table(\"$filename\", header = TRUE, sep=\"\t\")\n";
+
+    if (defined $overlap){
+        print $rcfh "results<-data.frame(data\$Cell, data\$Tissue, data\$Accession, data\$SNPs)
+        names(results)<-c(\"Cell\", \"Tissue\", \"Accession\", \"SNPs\")\n";
+    } else {
+        print $rcfh "results<-data.frame(data\$Cell, data\$Tissue, data\$Accession, data\$Pvalue, data\$Zscore, data\$SNPs)
+        names(results)<-c(\"Cell\", \"Tissue\", \"Accession\", \"Pvalue\", \"Zscore\", \"SNPs\")\n";
+    }
+    print $rcfh "require(rCharts)
     dt <- dTable(
       results,
       sScrollY= \"600\",
