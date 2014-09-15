@@ -12,7 +12,7 @@ use Forge::Stats;
 use Forge::Plot;
 use Forge::Forge; # ld_filter . need to use all functions from plot and forge
 
-our $VERSION = '1.1';
+our $VERSION = '1.2';
 # percentile bins for the bkgrd calculations. This is hard coded so there are enough SNPs to choose from, but could later be altered.
 my $per = 10;
 
