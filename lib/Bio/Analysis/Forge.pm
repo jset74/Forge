@@ -335,7 +335,7 @@ if ($self->overlap) {
 	    $snp_string = join(",", @{$$test{'CELLS'}{$cell}{'SNPS'}}) if defined $$test{'CELLS'}{$cell}{'SNPS'}; # This gives the list of overlapping SNPs for use in the tooltips. If there are a lot of them this can be a little useless
 	    my ($shortcell, undef) = split('\|', $cell); # undo the concatenation from earlier to deal with identical cell names.
 
-	    print $bfh join("\t", @{$bkgrd{$cell}});
+	    print $bfh join("\t", @{$bkgrd{$cell} || []});
 
 	    my $teststat = $$test{'CELLS'}{$cell}{'COUNT'}; #number of overlaps for the test SNPs
 
@@ -346,7 +346,7 @@ if ($self->overlap) {
 		print $ofh join("\t", $shortcell, $$tissues{$cell}{'tissue'}, $$tissues{$cell}{'file'}, $snp_string, $n, $$tissues{$cell}{'acc'}) . "\n";
 	    } else{
 		my $tests;
-		foreach (@{$bkgrd{$cell}}){
+		foreach (@{$bkgrd{$cell} || []}){
 		    $tests+= $_;
 		}
 		my $p = sprintf("%.6f", $tests/$backsnps);
@@ -397,13 +397,13 @@ if ($self->overlap) {
 		$self->status( "RESULTS#20\n" );
 		$self->dChart($filename); # rCharts Dimple chart
 	    }
+
 	    $self->status("RESULTS#60\n");
 	    $self->table($filename); # Datatables chart
 	}
 	$self->status( "RESULTS#100\n" );
     };
 
-   
     $self->status ( "COMPLETE#100\n" );
 
     if ($!) {
@@ -735,7 +735,6 @@ sub table{
     my $t2 = $self->t2;
     my $overlap = $self->overlap;
 
-
     my $rfile = "$Rdir/table.R";
     open my $rcfh, ">", "$rfile";
     if (my $rlib = $self->r_libs) {
@@ -761,6 +760,7 @@ sub table{
       sScrollXInner= \"110%\"
     )
     dt\$save('$chart', cdn = F)";
+
     system "R --no-save --quiet --slave < $rfile";
 }
 
