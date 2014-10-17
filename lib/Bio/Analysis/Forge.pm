@@ -383,9 +383,9 @@ if ($self->overlap) {
 
 	close $ofh;
 
-	my $cellcount = scalar @$cells;
-	my $fdr = $self->fdr($pos, $snpcount, $cellcount);
-	$self->debug("$pos positive lines at FDR = $fdr at Z >= 3.39\n");
+#	my $cellcount = scalar @$cells;
+#	my $fdr = $self->fdr($pos, $snpcount, $cellcount);
+#	$self->debug("$pos positive lines at FDR = $fdr at Z >= 3.39\n");
 
 
 	unless (defined $self->noplot){
